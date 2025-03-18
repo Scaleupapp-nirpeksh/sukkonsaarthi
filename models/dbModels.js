@@ -158,7 +158,25 @@ const RelationshipModel = {
             console.error(`❌ Error getting relationship: ${error}`);
             return null;
         }
+    },
+
+    /**
+ * Get all relationships from the database
+ * @returns {Promise<Array>} - All relationships
+ */
+getAllRelationships: async () => {
+    try {
+        const params = {
+            TableName: DB_TABLES.RELATIONSHIPS_TABLE
+        };
+        
+        const result = await dynamoDB.scan(params).promise();
+        return result.Items || [];
+    } catch (error) {
+        console.error(`❌ Error getting all relationships: ${error}`);
+        return [];
     }
+}
 };
 
 /**
@@ -561,35 +579,41 @@ updateReminder: async (reminderId, updateData) => {
  * @param {string} userPhone - User's phone number
  * @returns {Promise<Object|null>} - Latest reminder or null if none
  */
-getLatestReminder: async (userPhone) => {
-    try {
-        const standardizedPhone = userPhone.replace('whatsapp:', '');
-        const now = new Date();
-        const fifteenMinutesAgo = new Date(now.getTime() - 15 * 60 * 1000); // 15 minute window
-        
-        const params = {
-            TableName: DB_TABLES.REMINDERS_TABLE,
-            IndexName: "UserPhoneIndex",
-            KeyConditionExpression: "userPhone = :phone",
-            FilterExpression: "createdAt > :time AND responded = :r",
-            ExpressionAttributeValues: { 
-                ":phone": standardizedPhone,
-                ":time": fifteenMinutesAgo.toISOString(),
-                ":r": false
-            },
-            ScanIndexForward: false, // Get most recent first
-            Limit: 1
-        };
-        
-        const result = await dynamoDB.query(params).promise();
-        console.log(`Found ${result.Items ? result.Items.length : 0} recent reminders for ${userPhone}`);
-        
-        return (result.Items && result.Items.length > 0) ? result.Items[0] : null;
-    } catch (error) {
-        console.error(`❌ Error getting latest reminder: ${error}`);
-        return null;
+    getLatestReminder: async (userPhone) => {
+        try {
+            const standardizedPhone = userPhone.replace('whatsapp:', '');
+            const now = new Date();
+            const thirtyMinutesAgo = new Date(now.getTime() - 30 * 60 * 1000); // Extend window to 30 minutes
+            
+            console.log(`Looking for latest reminder for ${standardizedPhone} since ${thirtyMinutesAgo.toISOString()}`);
+            
+            const params = {
+                TableName: DB_TABLES.REMINDERS_TABLE,
+                IndexName: "UserPhoneIndex",
+                KeyConditionExpression: "userPhone = :phone",
+                FilterExpression: "createdAt > :time AND responded = :r",
+                ExpressionAttributeValues: { 
+                    ":phone": standardizedPhone,
+                    ":time": thirtyMinutesAgo.toISOString(),
+                    ":r": false
+                },
+                ScanIndexForward: false, // Get most recent first
+                Limit: 1
+            };
+            
+            const result = await dynamoDB.query(params).promise();
+            console.log(`Found ${result.Items ? result.Items.length : 0} recent reminders for ${userPhone}`);
+            
+            if (result.Items && result.Items.length > 0) {
+                console.log(`Latest reminder details: ${JSON.stringify(result.Items[0])}`);
+            }
+            
+            return (result.Items && result.Items.length > 0) ? result.Items[0] : null;
+        } catch (error) {
+            console.error(`❌ Error getting latest reminder: ${error}`);
+            return null;
+        }
     }
-}
 };
 
 
@@ -734,10 +758,214 @@ const SymptomModel = {
 };
 
 
+    /**
+ * Check-in related database functions
+ */
+const CheckInModel = {
+    /**
+     * Save a check-in response to the database
+     * @param {Object} checkInData - Check-in data to save
+     * @returns {Promise<boolean>} - Success status
+     */
+    saveCheckIn: async (checkInData) => {
+        try {
+            const params = {
+                TableName: DB_TABLES.CHECK_INS_TABLE,
+                Item: {
+                    ...checkInData,
+                    createdAt: new Date().toISOString()
+                }
+            };
+
+            await dynamoDB.put(params).promise();
+            console.log(`✅ Saved check-in for ${checkInData.userId}`);
+            return true;
+        } catch (error) {
+            console.error(`❌ Error saving check-in: ${error}`);
+            return false;
+        }
+    },
+
+    /**
+     * Get recent check-ins for a user
+     * @param {string} userId - User's phone number
+     * @param {number} limit - Maximum number of check-ins to retrieve
+     * @returns {Promise<Array>} - Recent check-ins
+     */
+    getRecentCheckIns: async (userId, limit = 5) => {
+        try {
+            const params = {
+                TableName: DB_TABLES.CHECK_INS_TABLE,
+                IndexName: "UserIdIndex",
+                KeyConditionExpression: "userId = :uid",
+                ExpressionAttributeValues: {
+                    ":uid": userId
+                },
+                ScanIndexForward: false, // most recent first
+                Limit: limit
+            };
+            
+            const result = await dynamoDB.query(params).promise();
+            return result.Items || [];
+        } catch (error) {
+            console.error(`❌ Error getting recent check-ins: ${error}`);
+            return [];
+        }
+    },
+
+   /**
+ * Get today's check-ins for a user
+ * @param {string} userId - User's phone number
+ * @returns {Promise<Array>} - Today's check-ins
+ */
+getTodaysCheckIns: async (userId) => {
+    try {
+      const today = new Date();
+      // Set time to midnight so we get everything from today's date forward
+      today.setHours(0, 0, 0, 0);
+  
+      const params = {
+        TableName: DB_TABLES.CHECK_INS_TABLE,
+        IndexName: "UserIdIndex",          // GSI that has userId as partition key and timestamp as sort key
+        // Query by userId and timestamp >= today's date
+        KeyConditionExpression: "userId = :uid AND #ts >= :today",
+        ExpressionAttributeNames: {
+          "#ts": "timestamp"               // Alias 'timestamp' if it's a reserved word
+        },
+        ExpressionAttributeValues: {
+          ":uid": userId,
+          ":today": today.toISOString()
+        }
+      };
+  
+      // Execute the query
+      const result = await dynamoDB.query(params).promise();
+      return result.Items || [];
+    } catch (error) {
+      console.error(`❌ Error getting today's check-ins: ${error}`);
+      return [];
+    }
+  },
+  
+
+    /**
+     * Mark check-ins as reported
+     * @param {Array} checkInIds - Array of check-in IDs
+     * @param {string} reportId - ID of the report that includes these check-ins
+     * @returns {Promise<boolean>} - Success status
+     */
+    markCheckInsAsReported: async (checkInIds, reportId) => {
+        try {
+            // Update each check-in in parallel
+            const updatePromises = checkInIds.map(checkInId => {
+                const params = {
+                    TableName: DB_TABLES.CHECK_INS_TABLE,
+                    Key: { checkInId },
+                    UpdateExpression: "set reported = :r, reportedTo = :rp",
+                    ExpressionAttributeValues: {
+                        ":r": true,
+                        ":rp": reportId
+                    }
+                };
+                
+                return dynamoDB.update(params).promise();
+            });
+            
+            await Promise.all(updatePromises);
+            console.log(`✅ Marked ${checkInIds.length} check-ins as reported`);
+            return true;
+        } catch (error) {
+            console.error(`❌ Error marking check-ins as reported: ${error}`);
+            return false;
+        }
+    }
+};
+
+/**
+ * Daily reports database functions
+ */
+const ReportModel = {
+    /**
+     * Save a daily report to the database
+     * @param {Object} reportData - Report data to save
+     * @returns {Promise<boolean>} - Success status
+     */
+    saveReport: async (reportData) => {
+        try {
+            const params = {
+                TableName: DB_TABLES.DAILY_REPORTS_TABLE,
+                Item: {
+                    ...reportData,
+                    createdAt: new Date().toISOString()
+                }
+            };
+
+            await dynamoDB.put(params).promise();
+            console.log(`✅ Saved report for caregiver ${reportData.caregiverId} about elderly ${reportData.elderlyId}`);
+            return true;
+        } catch (error) {
+            console.error(`❌ Error saving report: ${error}`);
+            return false;
+        }
+    },
+
+    /**
+     * Get reports for a specific caregiver and elderly pair
+     * @param {string} caregiverId - Caregiver's phone number
+     * @param {string} elderlyId - Elderly's phone number
+     * @param {number} limit - Maximum number of reports to retrieve
+     * @returns {Promise<Array>} - Recent reports
+     */
+    getRecentReports: async (caregiverId, elderlyId, limit = 7) => {
+        try {
+            // First part of the reportId is caregiverId_elderlyId
+            const reportIdPrefix = `${caregiverId}_${elderlyId}`;
+            
+            const params = {
+                TableName: DB_TABLES.DAILY_REPORTS_TABLE,
+                FilterExpression: "begins_with(reportId, :prefix)",
+                ExpressionAttributeValues: {
+                    ":prefix": reportIdPrefix
+                },
+                ScanIndexForward: false, // most recent first
+                Limit: limit
+            };
+            
+            const result = await dynamoDB.scan(params).promise();
+            return result.Items || [];
+        } catch (error) {
+            console.error(`❌ Error getting recent reports: ${error}`);
+            return [];
+        }
+    },
+
+    /**
+     * Get a specific report by ID
+     * @param {string} reportId - Report ID
+     * @returns {Promise<Object|null>} - Report data or null if not found
+     */
+    getReportById: async (reportId) => {
+        try {
+            const params = {
+                TableName: DB_TABLES.DAILY_REPORTS_TABLE,
+                Key: { reportId }
+            };
+            
+            const result = await dynamoDB.get(params).promise();
+            return result.Item || null;
+        } catch (error) {
+            console.error(`❌ Error getting report by ID: ${error}`);
+            return null;
+        }
+    }
+};
+
 module.exports = {
     UserModel,
     RelationshipModel,
     MedicationModel,
     ReminderModel,
-    SymptomModel
+    SymptomModel,
+    CheckInModel,
+    ReportModel
 };

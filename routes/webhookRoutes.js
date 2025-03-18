@@ -10,6 +10,7 @@ const aiResponseService = require('../services/aiResponseService');
 const medicationInfoService = require('../services/medicationInfoService');
 const { ReminderModel, SymptomModel } = require('../models/dbModels');
 const sessionStore = require('../models/sessionStore');
+const checkInService = require('../services/checkInService');
 
 // Import handlers
 const accountHandler = require('../handlers/accountHandler');
@@ -47,7 +48,40 @@ router.post('/', async (req, res) => {
         console.log(`Current medication session: ${medicationSession ? JSON.stringify(medicationSession) : 'None'}`);
 
         //======================================================================
-        // PART 1: HANDLE ACTIVE SESSIONS AND ONGOING CONVERSATIONS FIRST
+        // PART 0: HANDLE MEDICATION REMINDERS FIRST (HIGHEST PRIORITY)
+        //======================================================================
+
+        // Handle "Yes/No" medication responses (regardless of user session)
+        if (incomingMsgLower === "yes" || incomingMsgLower === "no") {
+            console.log(`Checking for medication reminders for: ${standardizedFrom}`);
+            const thirtyMinutesAgo = new Date(new Date().getTime() - 30 * 60 * 1000);
+            console.log(`Looking for reminders since: ${thirtyMinutesAgo.toISOString()}`);
+            
+            // Get the latest reminder from database to see if this is a medication response
+            const latestReminder = await ReminderModel.getLatestReminder(standardizedFrom);
+            console.log(`Latest reminder check result:`, latestReminder);
+            
+            // If there's a recent unresponded reminder, treat this as a medication response
+            if (latestReminder && !latestReminder.responded) {
+                console.log(`Found active reminder for ${standardizedFrom}, treating "${incomingMsg}" as medication response`);
+                
+                try {
+                    if (incomingMsgLower === "yes") {
+                        return await medicationHandler.handleMedicationTaken(req, res);
+                    } else {
+                        return await medicationHandler.handleMedicationMissed(req, res);
+                    }
+                } catch (error) {
+                    console.error(`❌ Error handling medication response: ${error}`);
+                    await sendWhatsAppMessage(from, "Sorry, there was an error processing your medication response. Please try again later.");
+                    return res.status(200).send("Error handling medication response");
+                }
+            }
+            console.log(`No active reminder found for ${standardizedFrom}, treating "${incomingMsg}" as regular message`);
+        }
+
+        //======================================================================
+        // PART 1: HANDLE ACTIVE SESSIONS AND ONGOING CONVERSATIONS
         //======================================================================
         
         // Continue account creation flow if in progress
@@ -102,25 +136,38 @@ router.post('/', async (req, res) => {
         }
 
         //======================================================================
-        // PART 2: HANDLE MEDICATION REMINDERS
+        // PART 2: HANDLE CHECK-IN RESPONSES
         //======================================================================
-
-        // Handle "Yes/No" medication responses only if not in an active session and there is an active reminder
-        if ((incomingMsgLower === "yes" || incomingMsgLower === "no") && !userSession) {
-            // Get the latest reminder from database to see if this is a medication response
-            const latestReminder = await ReminderModel.getLatestReminder(standardizedFrom);
-            
-            // If there's a recent unresponded reminder, treat this as a medication response
-            if (latestReminder && !latestReminder.responded) {
-                console.log(`Found active reminder for ${from}, treating "${incomingMsg}" as medication response`);
+        
+        // Check if this might be a response to a check-in
+        if (!userSession && !medicationSession) {
+            try {
+                const checkInResult = await checkInService.processCheckInResponse(standardizedFrom, incomingMsg);
                 
-                if (incomingMsgLower === "yes") {
-                    return await medicationHandler.handleMedicationTaken(req, res);
-                } else {
-                    return await medicationHandler.handleMedicationMissed(req, res);
+                if (checkInResult && checkInResult.success) {
+                    console.log(`✅ Successfully processed check-in response`);
+                    
+                    // Send the follow-up message
+                    await sendWhatsAppMessage(from, checkInResult.followUp);
+                    
+                    // If the conversation isn't complete, don't send the main menu
+                    if (!checkInResult.conversationComplete) {
+                        return res.status(200).send("Check-in follow-up sent");
+                    }
+                    
+                    // Only return to the main menu if the conversation is complete
+                    if (checkInResult.conversationComplete) {
+                        setTimeout(async () => {
+                            await menuHandler.sendMainMenu(from);
+                        }, 5000); // Longer delay to let them read the final message
+                    }
+                    
+                    return res.status(200).send("Check-in response processed");
                 }
+            } catch (error) {
+                console.error(`❌ Error processing check-in response: ${error}`);
+                // Continue with other handlers if check-in processing fails
             }
-            console.log(`No active reminder found for ${from}, treating "${incomingMsg}" as regular message`);
         }
 
         //======================================================================
@@ -278,11 +325,44 @@ router.post('/', async (req, res) => {
             // If it wasn't a valid medication info request, fall through to AI response
         }
         
+        // Check-in report request from caregiver
+        if (incomingMsgLower.includes('daily report') || 
+            incomingMsgLower.includes('check-in report') || 
+            incomingMsgLower.includes('activity report') ||
+            incomingMsgLower.includes('how is my parent') ||
+            incomingMsgLower.includes('how is my mom') ||
+            incomingMsgLower.includes('how is my dad')) {
+            
+            try {
+                // Check if the user is a caregiver
+                const userDetails = await userService.getUserDetails(standardizedFrom);
+                
+                if (userDetails && userDetails.userType === 'child') {
+                    // Get the parent relationships
+                    const relationships = await userService.getChildRelationships(standardizedFrom);
+                    
+                    if (relationships && relationships.length > 0) {
+                        // Get the first parent by default
+                        const parentPhone = relationships[0].parentPhone;
+                        
+                        // Generate the report
+                        const report = await checkInService.generateDailyReport(parentPhone);
+                        
+                        await sendWhatsAppMessage(from, report);
+                        return res.status(200).send("Daily report sent.");
+                    }
+                }
+            } catch (error) {
+                console.error(`❌ Error handling report request: ${error}`);
+                // Continue to AI response if report generation fails
+            }
+        }
+        
         //======================================================================
         // PART 7: HANDLE GENERIC QUERIES WITH AI
         //======================================================================
 
-        // AI Response for any other query
+        // AI Response for any other query - this also handles casual conversation for check-ins
         console.log(`No specific handler matched, sending AI response`);
         const aiResponse = await aiResponseService.getAIResponse(incomingMsg);
         await sendWhatsAppMessage(from, aiResponse);

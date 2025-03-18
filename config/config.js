@@ -15,7 +15,9 @@ const DB_TABLES = {
     REMINDERS_TABLE: 'MedicationReminders',
     USERS_TABLE: 'SukoonUsers',
     RELATIONSHIPS_TABLE: 'UserRelationships',
-    SYMPTOMS_TABLE: 'SymptomAssessments'
+    SYMPTOMS_TABLE: 'SymptomAssessments',
+    CHECK_INS_TABLE: 'SukoonCheckIns',  
+    DAILY_REPORTS_TABLE: 'SukoonReports' 
 };
 
 // Create clients

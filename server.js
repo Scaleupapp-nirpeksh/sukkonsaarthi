@@ -8,12 +8,13 @@ const webhookRoutes = require('./routes/webhookRoutes');
 
 // Import services
 const reminderService = require('./services/reminderService');
-
 const followUpService = require('./services/followUpService');
-followUpService.startFollowUpScheduler();
+const checkInService = require('./services/checkInService');
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+
 
 // Middleware
 app.use(bodyParser.json());
@@ -22,8 +23,16 @@ app.use(bodyParser.urlencoded({ extended: true }));
 // Routes
 app.use('/whatsapp-webhook', webhookRoutes);
 
-// Start the reminder service
+
+
+
+// Start the services
 reminderService.startReminderScheduler();
+followUpService.startFollowUpScheduler();
+checkInService.initializeCheckInScheduler();
+checkInService.scheduleDailyReports();
+
+//checkInService.sendDailyReports();
 
 // Graceful shutdown
 process.on('SIGINT', () => {
