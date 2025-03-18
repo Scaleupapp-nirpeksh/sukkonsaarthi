@@ -8,8 +8,6 @@ const medicationService = require('../services/medicationService');
 const proxyService = require('../services/proxyService');
 const aiResponseService = require('../services/aiResponseService');
 const medicationInfoService = require('../services/medicationInfoService');
-const symptomAssessmentService = require('../services/symptomAssessmentService');
-const followUpService = require('../services/followUpService');
 const { ReminderModel, SymptomModel } = require('../models/dbModels');
 const sessionStore = require('../models/sessionStore');
 
@@ -21,7 +19,7 @@ const followUpHandler = require('../handlers/followUpHandler');
 const menuHandler = require('../handlers/menuHandler');
 
 /**
- * Main webhook endpoint handler
+ * Main webhook endpoint handler with prioritized processing logic
  */
 router.post('/', async (req, res) => {
     try {
@@ -32,10 +30,83 @@ router.post('/', async (req, res) => {
 
         console.log(`📩 Incoming message from ${from}: ${incomingMsg}`);
 
-        // PRIORITY 1: Handle medication confirmation responses FIRST
-        // This ensures medication responses are caught before any other logic
-        if (incomingMsgLower === "yes" || incomingMsgLower === "no") {
-            const standardizedFrom = standardizePhoneNumber(from); 
+        // Get the current session state early
+        const standardizedFrom = standardizePhoneNumber(from);
+        let userSession = sessionStore.getUserSession(from);
+        
+        // If session not found with original format, try standardized format
+        if (!userSession) {
+            userSession = sessionStore.getUserSession(standardizedFrom);
+            console.log(`Looking for session with standardized phone: ${standardizedFrom}`);
+        }
+        
+        const medicationSession = sessionStore.getMedicationSession(from);
+        
+        // Log the current session state for debugging
+        console.log(`Current user session: ${userSession ? JSON.stringify(userSession) : 'None'}`);
+        console.log(`Current medication session: ${medicationSession ? JSON.stringify(medicationSession) : 'None'}`);
+
+        //======================================================================
+        // PART 1: HANDLE ACTIVE SESSIONS AND ONGOING CONVERSATIONS FIRST
+        //======================================================================
+        
+        // Continue account creation flow if in progress
+        if (sessionStore.getAccountCreationSession(from)) {
+            return await accountHandler.continueAccountCreation(req, res);
+        }
+
+        // Continue medication add flow - Check first for active medication flows
+        if (medicationSession && medicationSession.stage && 
+            (medicationSession.stage === 1 || 
+             medicationSession.stage === 2 || 
+             medicationSession.stage.toString().startsWith('add_'))) {
+            return await medicationHandler.continueAddMedication(req, res);
+        }
+        
+        // Continue medication update flow
+        if (medicationSession && medicationSession.stage && 
+            medicationSession.stage.toString().startsWith('update_')) {
+            return await medicationHandler.continueMedicationUpdate(req, res);
+        }
+        
+        // Continue medication deletion flow
+        if (medicationSession && medicationSession.stage && 
+            medicationSession.stage.toString().startsWith('delete_')) {
+            return await medicationHandler.continueMedicationDeletion(req, res);
+        }
+        
+        // Handle symptom assessment flow
+        if (userSession && userSession.type === 'symptom') {
+            return await symptomHandler.continueSymptomAssessment(req, res);
+        }
+        
+        // Handle symptom follow-up responses
+        if (userSession && userSession.type === 'follow_up') {
+            console.log(`Found follow-up session for ${from}, handling follow-up response`);
+            return await followUpHandler.handleFollowUpResponse(req, res);
+        }
+
+        // Handle main menu selection - Only process numeric selection if in main menu
+        if (userSession && userSession.stage === 'main_menu') {
+            return await menuHandler.handleMainMenuSelection(req, res);
+        }
+
+        // Handle medication menu selection
+        if (userSession && userSession.stage === 'medication_menu') {
+            return await menuHandler.handleMedicationMenuSelection(req, res);
+        }
+
+        // Handle medication info selection
+        if (userSession && userSession.stage === 'medication_info_selection') {
+            return await medicationHandler.handleMedicationInfoSelection(req, res);
+        }
+
+        //======================================================================
+        // PART 2: HANDLE MEDICATION REMINDERS
+        //======================================================================
+
+        // Handle "Yes/No" medication responses only if not in an active session and there is an active reminder
+        if ((incomingMsgLower === "yes" || incomingMsgLower === "no") && !userSession) {
             // Get the latest reminder from database to see if this is a medication response
             const latestReminder = await ReminderModel.getLatestReminder(standardizedFrom);
             
@@ -49,19 +120,21 @@ router.post('/', async (req, res) => {
                     return await medicationHandler.handleMedicationMissed(req, res);
                 }
             }
-            // If no active reminder, continue with regular message processing
             console.log(`No active reminder found for ${from}, treating "${incomingMsg}" as regular message`);
         }
 
-        // PRIORITY 1.5: Handle numeric symptom follow-up responses (1, 2, 3, 4)
-        if (incomingMsg === "1" || incomingMsg === "2" || incomingMsg === "3" || incomingMsg === "4") {
-            console.log(`📱 Detected possible symptom follow-up response: ${incomingMsg}`);
+        //======================================================================
+        // PART 3: HANDLE SYMPTOM FOLLOW-UPS FOR DIRECT NUMERIC RESPONSES
+        //======================================================================
+
+        // Handle numeric symptom follow-up responses (1, 2, 3, 4) ONLY if not in an active session
+        if ((incomingMsg === "1" || incomingMsg === "2" || incomingMsg === "3" || incomingMsg === "4") && 
+            (!userSession || (!userSession.stage && !userSession.type))) {
             
-            // Try to find active symptom assessments for this user
-            const standardizedFrom = standardizePhoneNumber(from);
-            console.log(`📱 Looking for active assessments for: ${standardizedFrom}`);
+            console.log(`📱 Detected possible direct symptom follow-up response: ${incomingMsg}`);
             
             try {
+                // Check for any active symptom assessments
                 const activeAssessments = await SymptomModel.getActiveAssessments(standardizedFrom);
                 console.log(`📱 Found ${activeAssessments.length} active assessments`);
                 
@@ -69,9 +142,10 @@ router.post('/', async (req, res) => {
                     // Use the most recent assessment
                     const assessment = activeAssessments[0];
                     const assessmentId = assessment.assessmentId;
-                    console.log(`📱 Processing follow-up for assessment: ${assessmentId}`);
+                    console.log(`📱 Processing direct follow-up for assessment: ${assessmentId}`);
                     
                     // Process the follow-up
+                    const followUpService = require('../services/followUpService');
                     const result = await followUpService.processFollowUpResponse(
                         standardizedFrom,
                         assessmentId,
@@ -79,7 +153,7 @@ router.post('/', async (req, res) => {
                     );
                     
                     if (result.success) {
-                        console.log(`📱 Successfully processed follow-up response`);
+                        console.log(`📱 Successfully processed direct follow-up response`);
                         
                         // Send the recommendations
                         await sendWhatsAppMessage(from, result.recommendations);
@@ -107,20 +181,19 @@ router.post('/', async (req, res) => {
             }
         }
 
-        // PRIORITY 2: Account management and existence checks
+        //======================================================================
+        // PART 4: HANDLE ACCOUNT MANAGEMENT
+        //======================================================================
+
+        // Check if user exists
         const userExists = await userService.checkUserExists(from);
         
-        // Handle account creation flow
+        // Handle account creation command
         if (!userExists && (incomingMsgLower === "create an account" || incomingMsgLower === "create account")) {
             return await accountHandler.startAccountCreation(req, res);
         }
-        
-        // Handle ongoing account creation flow
-        if (sessionStore.getAccountCreationSession(from)) {
-            return await accountHandler.continueAccountCreation(req, res);
-        }
 
-        // If user doesn't exist and isn't in account creation flow, prompt to create account
+        // If user doesn't exist and isn't creating an account, prompt to create account
         if (!userExists) {
             await sendWhatsAppMessage(from, 
                 `Welcome to Sukoon Saarthi! It seems you don't have an account yet.\n\n` +
@@ -129,116 +202,62 @@ router.post('/', async (req, res) => {
             return res.status(200).send("Asked to create account");
         }
 
+        //======================================================================
+        // PART 5: HANDLE EXPLICIT COMMANDS AND NAVIGATIONAL INPUTS
+        //======================================================================
+
         // Handle proxy commands (child managing parent's account)
         const proxyCommand = parseProxyCommand(incomingMsg);
         if (proxyCommand) {
             return await handleProxyCommand(req, res, proxyCommand);
         }
         
-        // Welcome Message
+        // Welcome message command
         if (incomingMsgLower === "hi" || incomingMsgLower === "hello") {
             return await menuHandler.showWelcomeMenu(req, res);
         }
-
-        // Get the current sessions
-        const standardizedFrom = standardizePhoneNumber(from);
-        let userSession = sessionStore.getUserSession(from);
         
-        // If session not found with original format, try standardized format
-        if (!userSession) {
-            userSession = sessionStore.getUserSession(standardizedFrom);
-            console.log(`Looking for session with standardized phone: ${standardizedFrom}`);
-        }
-        
-        const medicationSession = sessionStore.getMedicationSession(from);
-
-        // PRIORITY 3: Ongoing conversation flows
-        // Continue medication add flow - CHECK THIS FIRST
-        if (medicationSession && medicationSession.stage && 
-            (medicationSession.stage === 1 || 
-             medicationSession.stage === 2 || 
-             medicationSession.stage.toString().startsWith('add_'))) {
-            return await medicationHandler.continueAddMedication(req, res);
-        }
-        
-        // Continue medication update flow - CHECK THIS SECOND
-        if (medicationSession && medicationSession.stage && 
-            medicationSession.stage.toString().startsWith('update_')) {
-            return await medicationHandler.continueMedicationUpdate(req, res);
-        }
-        
-        // Continue medication deletion flow - CHECK THIS THIRD
-        if (medicationSession && medicationSession.stage && 
-            medicationSession.stage.toString().startsWith('delete_')) {
-            return await medicationHandler.continueMedicationDeletion(req, res);
-        }
-
-        // Handle symptom follow-up responses - Check with full "from" format
-        if (userSession && userSession.type === 'follow_up') {
-            console.log(`Found follow-up session for ${from}, handling follow-up response`);
-            return await followUpHandler.handleFollowUpResponse(req, res);
-        }
-
-        // Handle main menu selection
-        if (userSession && userSession.stage === 'main_menu') {
-            return await menuHandler.handleMainMenuSelection(req, res);
-        }
-
-        // Handle medication menu selection
-        if (userSession && userSession.stage === 'medication_menu') {
-            return await menuHandler.handleMedicationMenuSelection(req, res);
-        }
-
-        // Handle medication info selection
-        if (userSession && userSession.stage === 'medication_info_selection') {
-            return await medicationHandler.handleMedicationInfoSelection(req, res);
-        }
-
-        // Handle "back to menu" option
+        // Menu navigation commands
         if (incomingMsgLower === "menu" || incomingMsgLower === "main menu" || 
             incomingMsgLower === "back" || incomingMsgLower === "7") {
             await menuHandler.sendMainMenu(from);
             return res.status(200).send("Returned to main menu.");
         }
         
-        // Start symptom assessment
+        //======================================================================
+        // PART 6: HANDLE FEATURE-SPECIFIC COMMANDS
+        //======================================================================
+        
+        // Symptom assessment commands
         if (incomingMsgLower === "symptom") {
             return await symptomHandler.startSymptomAssessment(req, res);
         }
-
-        // Process symptom assessment steps
-        if (userSession && userSession.type === 'symptom') {
-            return await symptomHandler.continueSymptomAssessment(req, res);
-        }
         
-        // Check symptom status explicitly requested
         if (incomingMsgLower === "check symptom status" || incomingMsgLower === "symptom status") {
             return await followUpHandler.showSymptomStatus(req, res);
         }
         
-        // Start medication update flow
-        if (incomingMsgLower === "update medicine") {
-            return await medicationHandler.startMedicationUpdate(req, res);
-        }
-
-        // Start medication add flow
+        // Medication management commands
         if (incomingMsgLower === "add medicine") {
             return await medicationHandler.startAddMedication(req, res);
         }
         
-        // Start medication delete flow
+        if (incomingMsgLower === "update medicine") {
+            return await medicationHandler.startMedicationUpdate(req, res);
+        }
+        
         if (incomingMsgLower === "delete medicine" || incomingMsgLower === "remove medicine") {
             return await medicationHandler.startMedicationDeletion(req, res);
         }
         
-        // Handle medication history requests
+        // Medication history commands
         if (incomingMsgLower === "show medication history last week") {
             return await medicationHandler.showMedicationHistory(req, res, 7);
         } else if (incomingMsgLower === "show all medication history") {
             return await medicationHandler.showMedicationHistory(req, res, null);
         }
         
-        // Medication Information Request
+        // Medication information request
         if (incomingMsgLower.includes('medicine info') || 
             incomingMsgLower.includes('medication info') || 
             incomingMsgLower.includes('drug info') ||
@@ -258,6 +277,10 @@ router.post('/', async (req, res) => {
             }
             // If it wasn't a valid medication info request, fall through to AI response
         }
+        
+        //======================================================================
+        // PART 7: HANDLE GENERIC QUERIES WITH AI
+        //======================================================================
 
         // AI Response for any other query
         console.log(`No specific handler matched, sending AI response`);
@@ -266,7 +289,14 @@ router.post('/', async (req, res) => {
         return res.status(200).send("AI response sent.");
 
     } catch (error) {
-        console.error("❌ Error processing webhook request:", error);
+        console.error("❌ Error processing webhook request:", error.message, error);
+        try {
+            // Try to send an error message to the user
+            await sendWhatsAppMessage(req.body.From, 
+                "I'm sorry, there was an error processing your request. Please try again later.");
+        } catch (msgError) {
+            console.error("❌ Error sending error message:", msgError);
+        }
         return res.status(500).send("Internal Server Error");
     }
 });
