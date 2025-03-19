@@ -32,7 +32,7 @@ followUpService.startFollowUpScheduler();
 checkInService.initializeCheckInScheduler();
 checkInService.scheduleDailyReports();
 
-checkInService.sendDailyReports();
+//checkInService.sendDailyReports();
 
 // Graceful shutdown
 process.on('SIGINT', () => {
