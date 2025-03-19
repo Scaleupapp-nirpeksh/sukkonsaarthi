@@ -89,14 +89,20 @@ function splitMessageIntoChunks(message, maxLength = 1400) {
  * @returns {Object|null} - Parsed command or null if not a proxy command
  */
 function parseProxyCommand(message) {
-    if (!message.startsWith('for:')) {
+    // Make the check case-insensitive by converting to lowercase
+    if (!message.toLowerCase().startsWith('for:')) {
         return null;
     }
     
     try {
-        const parts = message.split(' ');
-        const parentPhone = parts[0].replace('for:', '');
-        const command = parts.slice(1).join(' ');
+        // Split the message but maintain original case for the remaining part
+        const firstSpace = message.indexOf(' ');
+        if (firstSpace === -1) return null;
+        
+        const parentPhone = message.substring(4, firstSpace).trim();
+        const command = message.substring(firstSpace + 1).trim();
+        
+        console.log(`🔄 Parsed proxy command: parentPhone=${parentPhone}, command=${command}`);
         
         return {
             parentPhone,

@@ -127,8 +127,54 @@ async function sendWhatsAppTemplate(to, templateSid, variables) {
     }
 }
 
+
+/**
+ * Send parent welcome template
+ * @param {string} parentPhone - Parent's phone number
+ * @param {string} parentName - Parent's name
+ * @param {string} caregiverName - Caregiver's name
+ * @returns {Promise<boolean>} - Success status
+ */
+async function sendParentWelcomeTemplate(parentPhone, parentName, caregiverName) {
+    try {
+        // Make sure both numbers have the whatsapp: prefix
+        const fromNumber = process.env.TWILIO_WHATSAPP_NUMBER;
+        const formattedFrom = fromNumber.startsWith('whatsapp:') ? fromNumber : `whatsapp:${fromNumber}`;
+        const formattedTo = parentPhone.startsWith('whatsapp:') ? parentPhone : `whatsapp:${parentPhone}`;
+        
+        // Use either the specific template SID or fall back to the report template
+        const templateSid = process.env.TWILIO_WELCOME ;
+        
+        if (!templateSid) {
+            console.error("❌ Missing template SID in environment variables");
+            return false;
+        }
+        
+        console.log(`Sending welcome template from: ${formattedFrom} to: ${formattedTo}`);
+        
+        const variables = {
+            "1": parentName || "there",
+            "2": caregiverName || "your family member"
+        };
+        
+        await twilioClient.messages.create({
+            contentSid: templateSid,
+            from: formattedFrom,
+            to: formattedTo,
+            contentVariables: JSON.stringify(variables)
+        });
+        
+        console.log(`📤 Sent welcome template to ${parentPhone} for ${parentName}`);
+        return true;
+    } catch (error) {
+        console.error(`❌ Error sending parent welcome template: ${error}`);
+        return false;
+    }
+}
+
 module.exports = {
     sendWhatsAppMessage,
     sendReminderMessage,
-    sendWhatsAppTemplate
+    sendWhatsAppTemplate,
+    sendParentWelcomeTemplate
 };

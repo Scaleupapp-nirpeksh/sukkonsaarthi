@@ -267,10 +267,19 @@ async function startAddMedication(req, res) {
  */
 async function continueAddMedication(req, res) {
     const from = req.body.From;
+    const standardizedFrom = standardizePhoneNumber(from);
     const incomingMsg = req.body.Body.trim();
     const incomingMsgLower = incomingMsg.toLowerCase();
-    const medicationSession = sessionStore.getMedicationSession(from);
-    
+
+    // Try to get session with both formats
+    let medicationSession = sessionStore.getMedicationSession(from) || sessionStore.getMedicationSession(standardizedFrom);
+   
+    if (!medicationSession) {
+        // Session not found - this could happen if there was a proxy command previously
+        await sendWhatsAppMessage(from, "I'm sorry, something went wrong with your medication setup. Let's start again.");
+        return await startAddMedication(req, res);
+    }
+
     // Handle each stage of the add process
     switch (medicationSession.stage) {
         case 1:

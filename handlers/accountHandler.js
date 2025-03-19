@@ -1,5 +1,5 @@
 // handlers/accountHandler.js - Logic for account creation flows
-const { sendWhatsAppMessage } = require('../services/messageService');
+const { sendWhatsAppMessage, sendParentWelcomeTemplate } = require('../services/messageService');
 const userService = require('../services/userService');
 const sessionStore = require('../models/sessionStore');
 
@@ -334,12 +334,19 @@ async function continueAccountCreation(req, res) {
                     `Now, please enter your second parent's WhatsApp number (with country code, e.g., +917XXXXXXXX):`
                 );
                 
-                // Send welcome message to the first parent
-                await sendWhatsAppMessage(currentParent.phone, 
-                    `Hello ${currentParent.name}, welcome to Sukoon Saarthi! 🌿\n\n` +
-                    `Your account has been set up by ${req.body.ProfileName || "your caregiver"}. I'll help you manage your medications and health.\n\n` +
-                    `Reply with "Hi" to get started.`
+                // Use template to send welcome message to the first parent
+                const templateSent = await sendParentWelcomeTemplate(
+                    currentParent.phone,
+                    currentParent.name,
+                    req.body.ProfileName || "your caregiver"
                 );
+                
+                // If template sending failed, notify the caregiver
+                if (!templateSent) {
+                    await sendWhatsAppMessage(from, 
+                        `Note: Due to WhatsApp policies, ${currentParent.name} will need to send a message to this number before they can receive messages. Please ask them to send "Hi" to ${process.env.TWILIO_WHATSAPP_NUMBER.replace('whatsapp:', '')} to activate their account.`
+                    );
+                }
                 
                 return res.status(200).send("First parent account created, moving to second");
             } else {
@@ -360,12 +367,19 @@ async function continueAccountCreation(req, res) {
                     `Your account is also registered, and you can use Sukoon Saarthi for your own health needs. Type "Hi" to get started.`
                 );
                 
-                // Send welcome message to the most recently added parent
-                await sendWhatsAppMessage(currentParent.phone, 
-                    `Hello ${currentParent.name}, welcome to Sukoon Saarthi! 🌿\n\n` +
-                    `Your account has been set up by ${req.body.ProfileName || "your caregiver"}. I'll help you manage your medications and health.\n\n` +
-                    `Reply with "Hi" to get started.`
+                // Use template to send welcome message to the most recently added parent
+                const templateSent = await sendParentWelcomeTemplate(
+                    currentParent.phone,
+                    currentParent.name,
+                    req.body.ProfileName || "your caregiver"
                 );
+                
+                // If template sending failed, notify the caregiver
+                if (!templateSent) {
+                    await sendWhatsAppMessage(from, 
+                        `Note: Due to WhatsApp policies, ${currentParent.name} will need to send a message to this number before they can receive messages. Please ask them to send "Hi" to ${process.env.TWILIO_WHATSAPP_NUMBER.replace('whatsapp:', '')} to activate their account.`
+                    );
+                }
                 
                 // Create child user record if it doesn't exist
                 const childExists = await userService.checkUserExists(from);
