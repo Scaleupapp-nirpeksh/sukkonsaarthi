@@ -1,12 +1,12 @@
 // services/checkInService.js - Service for AI-driven check-ins with elderly users
 const { createOpenAIClient } = require('../config/config');
-const { sendWhatsAppMessage } = require('./messageService');
 const { DB_TABLES, dynamoDB } = require('../config/config');
 const { CheckInModel, ReportModel, UserModel, RelationshipModel } = require('../models/dbModels');
 const userService = require('./userService');
 const { standardizePhoneNumber } = require('../utils/messageUtils');
 const { MedicationModel } = require('../models/dbModels');
 const { formatDate } = require('../utils/timeUtils');
+const { sendWhatsAppMessage, sendWhatsAppTemplate } = require('./messageService');
 
 
 // Track ongoing check-in conversations
@@ -482,71 +482,151 @@ Your response should feel like a natural conclusion to the conversation.`;
   }
 }
 
-/**
- * Generate and send daily reports to caregivers
- */
 async function sendDailyReports() {
   try {
-    console.log('📊 Generating daily reports');
-    
-    // Get all caregiver relationships
-    const relationships = await RelationshipModel.getAllRelationships();
-    
-    // Group by caregiver
-    const caregiverMap = {};
-    relationships.forEach(rel => {
-      if (!caregiverMap[rel.childPhone]) {
-        caregiverMap[rel.childPhone] = [];
+      console.log('📊 Generating daily reports');
+      
+      // Get all caregiver relationships
+      const relationships = await RelationshipModel.getAllRelationships();
+      
+      // Group by caregiver
+      const caregiverMap = {};
+      relationships.forEach(rel => {
+          if (!caregiverMap[rel.childPhone]) {
+              caregiverMap[rel.childPhone] = [];
+          }
+          caregiverMap[rel.childPhone].push(rel.parentPhone);
+      });
+      
+      console.log(`Found ${Object.keys(caregiverMap).length} caregivers with elderly relationships`);
+      
+      // Template SID for the daily report template
+      const REPORT_TEMPLATE_SID = process.env.TWILIO_REPORT_SID;
+      
+      // For each caregiver, generate reports for all their elderly
+      for (const [caregiverId, elderlyIds] of Object.entries(caregiverMap)) {
+          // Check if caregiver has interacted in last 24 hours
+          const hasRecentInteraction = await UserModel.hasRecentInteraction(caregiverId);
+          
+          for (const elderlyId of elderlyIds) {
+              // Generate the full report content
+              const report = await generateDailyReport(elderlyId);
+              
+              // Get user details
+              const elderlyUserData = await UserModel.getUserDetails(elderlyId);
+              const elderlyName = elderlyUserData?.name || "your family member";
+              
+              // Generate a unique report ID
+              const reportId = `${caregiverId}_${elderlyId}_${new Date().toISOString().split('T')[0]}`;
+              
+              // Get today's check-ins to mark as reported
+              const todaysCheckIns = await CheckInModel.getTodaysCheckIns(elderlyId);
+              const checkInIds = todaysCheckIns.map(checkIn => checkIn.checkInId);
+              
+              // Save report to database
+              const reportData = {
+                  reportId: reportId,
+                  elderlyId: elderlyId,
+                  caregiverId: caregiverId,
+                  date: new Date().toISOString().split('T')[0],
+                  content: report,
+                  checkInIds: checkInIds,
+                  sentTimestamp: new Date().toISOString(),
+                  delivered: false
+              };
+              
+              await ReportModel.saveReport(reportData);
+              
+              // Mark check-ins as reported
+              if (checkInIds.length > 0) {
+                  await CheckInModel.markCheckInsAsReported(checkInIds, reportId);
+              }
+              
+              // Split content into sections for template variables
+              // This depends on your report format, adjust as needed
+              const sections = splitReportIntoSections(report);
+              
+              let success = false;
+              
+              // Send report based on interaction status
+              if (hasRecentInteraction) {
+                  // Within 24-hour window, can use regular message
+                  console.log(`Caregiver ${caregiverId} has recent interaction, sending regular message`);
+                  success = await sendWhatsAppMessage(caregiverId, report);
+              } else {
+                  // Outside 24-hour window, must use template
+                  console.log(`Caregiver ${caregiverId} outside 24-hour window, using template`);
+                  success = await sendWhatsAppTemplate(caregiverId, REPORT_TEMPLATE_SID, {
+                      "1": elderlyName,
+                      "2": sections.health || "No health data available.",
+                      "3": sections.medication || "No medication data available.",
+                      "4": sections.activities || "No activities recorded today."
+                  });
+              }
+              
+              if (success) {
+                  console.log(`✅ Sent daily report to ${caregiverId} for ${elderlyId}`);
+                  
+                  // Update report as delivered
+                  await ReportModel.updateReportStatus(reportId, true);
+              } else {
+                  console.error(`❌ Failed to send report to ${caregiverId} for ${elderlyId}`);
+              }
+              
+              // Add a delay between sends to avoid rate limiting
+              await new Promise(resolve => setTimeout(resolve, 2000));
+          }
       }
-      caregiverMap[rel.childPhone].push(rel.parentPhone);
-    });
-    
-    console.log(`Found ${Object.keys(caregiverMap).length} caregivers with elderly relationships`);
-    
-    // For each caregiver, generate reports for all their elderly
-    for (const [caregiverId, elderlyIds] of Object.entries(caregiverMap)) {
-      for (const elderlyId of elderlyIds) {
-        const report = await generateDailyReport(elderlyId);
-        
-        // Generate a unique report ID
-        const reportId = `${caregiverId}_${elderlyId}_${new Date().toISOString().split('T')[0]}`;
-        
-        // Get today's check-ins to mark as reported
-        const todaysCheckIns = await CheckInModel.getTodaysCheckIns(elderlyId);
-        const checkInIds = todaysCheckIns.map(checkIn => checkIn.checkInId);
-        
-        // Save report to database
-        const reportData = {
-          reportId: reportId,
-          elderlyId: elderlyId,
-          caregiverId: caregiverId,
-          date: new Date().toISOString().split('T')[0],
-          content: report,
-          checkInIds: checkInIds,
-          sentTimestamp: new Date().toISOString(),
-          delivered: false
-        };
-        
-        await ReportModel.saveReport(reportData);
-        
-        // Mark check-ins as reported
-        if (checkInIds.length > 0) {
-          await CheckInModel.markCheckInsAsReported(checkInIds, reportId);
-        }
-        
-        // Send report to caregiver
-        await sendWhatsAppMessage(caregiverId, report);
-        console.log(`✅ Sent daily report to ${caregiverId} for ${elderlyId}`);
-        
-        // Add a delay between sends to avoid rate limiting
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      }
-    }
-    
-    console.log('✅ Daily reports completed');
+      
+      console.log('✅ Daily reports completed');
   } catch (error) {
-    console.error(`❌ Error sending daily reports: ${error}`);
+      console.error(`❌ Error sending daily reports: ${error}`);
   }
+}
+
+/**
+* Split a report into sections for template variables
+* @param {string} report - Full report content
+* @returns {Object} - Report sections
+*/
+function splitReportIntoSections(report) {
+  const sections = {
+      health: "",
+      medication: "",
+      activities: ""
+  };
+  
+  // Simple section extraction based on headings
+  // Adjust this based on your actual report format
+  
+  // Extract health section (everything between Health and Medication)
+  const healthMatch = report.match(/Health[^\n]*\n([\s\S]*?)(?=Medication|$)/i);
+  if (healthMatch && healthMatch[1]) {
+      sections.health = healthMatch[1].trim();
+  }
+  
+  // Extract medication section
+  const medicationMatch = report.match(/Medication[^\n]*\n([\s\S]*?)(?=Activities|Daily Activities|$)/i);
+  if (medicationMatch && medicationMatch[1]) {
+      sections.medication = medicationMatch[1].trim();
+  }
+  
+  // Extract activities section
+  const activitiesMatch = report.match(/Activities[^\n]*\n([\s\S]*?)(?=\n\n\*|$)/i);
+  if (activitiesMatch && activitiesMatch[1]) {
+      sections.activities = activitiesMatch[1].trim();
+  }
+  
+  // Ensure each section is within WhatsApp's character limit for template variables
+  const MAX_LENGTH = 950; // Leave room for formatting
+  
+  Object.keys(sections).forEach(key => {
+      if (sections[key].length > MAX_LENGTH) {
+          sections[key] = sections[key].substring(0, MAX_LENGTH) + "...";
+      }
+  });
+  
+  return sections;
 }
 
 /**

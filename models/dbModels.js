@@ -54,6 +54,53 @@ const UserModel = {
         }
     },
 
+
+    /**
+ * Update user's last interaction timestamp
+ * @param {string} phoneNumber - User's phone number
+ * @returns {Promise<boolean>} - Success status
+ */
+updateLastInteraction: async (phoneNumber) => {
+    try {
+        const params = {
+            TableName: DB_TABLES.USERS_TABLE,
+            Key: { phoneNumber },
+            UpdateExpression: "set lastInteraction = :time",
+            ExpressionAttributeValues: {
+                ":time": new Date().toISOString()
+            }
+        };
+
+        await dynamoDB.update(params).promise();
+        return true;
+    } catch (error) {
+        console.error(`❌ Error updating last interaction: ${error}`);
+        return false;
+    }
+},
+
+/**
+ * Check if user has interacted within the last 24 hours
+ * @param {string} phoneNumber - User's phone number
+ * @returns {Promise<boolean>} - Whether user has recent interaction
+ */
+hasRecentInteraction: async (phoneNumber) => {
+    try {
+        const result = await UserModel.getUserDetails(phoneNumber);
+        if (!result || !result.lastInteraction) {
+            return false;
+        }
+        
+        const lastInteraction = new Date(result.lastInteraction);
+        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        
+        return lastInteraction >= twentyFourHoursAgo;
+    } catch (error) {
+        console.error(`❌ Error checking recent interaction: ${error}`);
+        return false;
+    }
+},
+
     /**
      * Get user details from the database
      * @param {string} phoneNumber - User's phone number
@@ -574,46 +621,7 @@ updateReminder: async (reminderId, updateData) => {
     }
 },
 
-    /**
- * Get the latest reminder for a user
- * @param {string} userPhone - User's phone number
- * @returns {Promise<Object|null>} - Latest reminder or null if none
- */
-    getLatestReminder: async (userPhone) => {
-        try {
-            const standardizedPhone = userPhone.replace('whatsapp:', '');
-            const now = new Date();
-            const thirtyMinutesAgo = new Date(now.getTime() - 30 * 60 * 1000); // Extend window to 30 minutes
-            
-            console.log(`Looking for latest reminder for ${standardizedPhone} since ${thirtyMinutesAgo.toISOString()}`);
-            
-            const params = {
-                TableName: DB_TABLES.REMINDERS_TABLE,
-                IndexName: "UserPhoneIndex",
-                KeyConditionExpression: "userPhone = :phone",
-                FilterExpression: "createdAt > :time AND responded = :r",
-                ExpressionAttributeValues: { 
-                    ":phone": standardizedPhone,
-                    ":time": thirtyMinutesAgo.toISOString(),
-                    ":r": false
-                },
-                ScanIndexForward: false, // Get most recent first
-                Limit: 1
-            };
-            
-            const result = await dynamoDB.query(params).promise();
-            console.log(`Found ${result.Items ? result.Items.length : 0} recent reminders for ${userPhone}`);
-            
-            if (result.Items && result.Items.length > 0) {
-                console.log(`Latest reminder details: ${JSON.stringify(result.Items[0])}`);
-            }
-            
-            return (result.Items && result.Items.length > 0) ? result.Items[0] : null;
-        } catch (error) {
-            console.error(`❌ Error getting latest reminder: ${error}`);
-            return null;
-        }
-    },
+
 
 /**
      * Get the latest reminder for a user with improved time window and status tracking
@@ -1042,6 +1050,31 @@ const ReportModel = {
             return [];
         }
     },
+
+    /**
+ * Update report delivery status
+ * @param {string} reportId - Report ID
+ * @param {boolean} delivered - Whether report was delivered
+ * @returns {Promise<boolean>} - Success status
+ */
+updateReportStatus: async (reportId, delivered) => {
+    try {
+        const params = {
+            TableName: DB_TABLES.DAILY_REPORTS_TABLE,
+            Key: { reportId },
+            UpdateExpression: "set delivered = :d",
+            ExpressionAttributeValues: {
+                ":d": delivered
+            }
+        };
+        
+        await dynamoDB.update(params).promise();
+        return true;
+    } catch (error) {
+        console.error(`❌ Error updating report status: ${error}`);
+        return false;
+    }
+},
 
     /**
      * Get a specific report by ID

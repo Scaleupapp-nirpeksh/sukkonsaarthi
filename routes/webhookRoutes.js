@@ -36,6 +36,14 @@ router.post('/', async (req, res) => {
         console.log(`📩 Incoming message from ${from}: ${incomingMsg}`);
         const standardizedFrom = standardizePhoneNumber(from);
 
+        // Track interaction timestamp whenever user sends a message
+        try {
+            await UserModel.updateLastInteraction(standardizedFrom);
+        } catch (interactionError) {
+            console.error(`Error tracking interaction: ${interactionError}`);
+            // Continue processing even if tracking fails
+        }
+
         //======================================================================
         // PART 0: HANDLE ONGOING DISAMBIGUATION FIRST
         //======================================================================

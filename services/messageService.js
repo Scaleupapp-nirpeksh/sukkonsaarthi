@@ -94,7 +94,41 @@ async function sendReminderMessage(userPhone, medicine, reminderId) {
     }
 }
 
+
+/**
+ * Send a WhatsApp message using a template
+ * @param {string} to - Recipient phone number
+ * @param {string} templateSid - Twilio Content SID for the template
+ * @param {Object} variables - Template variables 
+ * @returns {Promise<boolean>} - Success status
+ */
+async function sendWhatsAppTemplate(to, templateSid, variables) {
+    try {
+        // Make sure both numbers have the whatsapp: prefix
+        const fromNumber = process.env.TWILIO_WHATSAPP_NUMBER;
+        const formattedFrom = fromNumber.startsWith('whatsapp:') ? fromNumber : `whatsapp:${fromNumber}`;
+        const formattedTo = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
+        templateSid = process.env.TWILIO_REPORT_SID;
+        
+        console.log(`Sending template from: ${formattedFrom} to: ${formattedTo}`);
+        
+        await twilioClient.messages.create({
+            contentSid: templateSid,
+            from: formattedFrom,
+            to: formattedTo,
+            contentVariables: JSON.stringify(variables)
+        });
+        
+        console.log(`📤 Sent template message to ${to}`);
+        return true;
+    } catch (error) {
+        console.error(`❌ Error sending template message: ${error}`, error);
+        return false;
+    }
+}
+
 module.exports = {
     sendWhatsAppMessage,
-    sendReminderMessage
+    sendReminderMessage,
+    sendWhatsAppTemplate
 };

@@ -32,7 +32,18 @@ followUpService.startFollowUpScheduler();
 checkInService.initializeCheckInScheduler();
 checkInService.scheduleDailyReports();
 
-//checkInService.sendDailyReports();
+/*
+(async () => {
+    try {
+      console.log('Sending initial daily reports on startup...');
+      await checkInService.sendDailyReports();
+      console.log('Initial daily reports sent successfully');
+    } catch (error) {
+      console.error('Error sending initial daily reports:', error);
+    }
+  })();
+
+  */
 
 // Graceful shutdown
 process.on('SIGINT', () => {
