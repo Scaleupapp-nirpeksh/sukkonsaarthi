@@ -715,10 +715,12 @@ function determineIfFollowUpNeeded(analysis) {
   const hasNegativeSentiment = analysis.sentiment === 'negative' || analysis.sentiment === 'neutral';
   const hasConcerns = analysis.concerns && analysis.concerns.length > 0;
   const hasWellbeingIssues = 
-    analysis.wellbeing.physical === 'concerning' || 
-    analysis.wellbeing.physical === 'fair' ||
-    analysis.wellbeing.emotional === 'concerning' || 
-    analysis.wellbeing.emotional === 'fair';
+    analysis.wellbeing && (
+      analysis.wellbeing.physical === 'concerning' || 
+      analysis.wellbeing.physical === 'fair' ||
+      analysis.wellbeing.emotional === 'concerning' || 
+      analysis.wellbeing.emotional === 'fair'
+    );
   
   return hasNegativeSentiment || hasConcerns || hasWellbeingIssues;
 }
@@ -730,6 +732,9 @@ function determineIfFollowUpNeeded(analysis) {
 * @returns {boolean} - Whether second follow-up is needed
 */
 function determineIfSecondFollowUpNeeded(analysis, conversationHistory) {
+ // Add null checks to prevent errors
+ if (!analysis || !conversationHistory) return false;
+ 
  // Get the last user response
  const lastUserResponse = conversationHistory.filter(msg => msg.role === 'user').pop();
  
@@ -764,16 +769,27 @@ async function generateFollowUpQuestion(userId, initialResponse, analysis) {
    const openaiClient = createOpenAIClient();
    const userData = await UserModel.getUserDetails(userId);
    
+   // Add defensive coding for the analysis object
+   const safeAnalysis = analysis || {};
+   const wellbeing = safeAnalysis.wellbeing || { 
+     physical: 'fair', 
+     emotional: 'fair', 
+     social: 'fair' 
+   };
+   const concerns = safeAnalysis.concerns || [];
+   const sentiment = safeAnalysis.sentiment || 'neutral';
+   const activities = safeAnalysis.activities || [];
+   
    // Tailor follow-up based on analysis
    let followUpFocus = "";
    
-   if (analysis.wellbeing.physical === 'concerning' || analysis.wellbeing.physical === 'fair') {
+   if (wellbeing.physical === 'concerning' || wellbeing.physical === 'fair') {
      followUpFocus = "physical_health";
-   } else if (analysis.wellbeing.emotional === 'concerning' || analysis.wellbeing.emotional === 'fair') {
+   } else if (wellbeing.emotional === 'concerning' || wellbeing.emotional === 'fair') {
      followUpFocus = "emotional_wellbeing";
-   } else if (analysis.wellbeing.social === 'concerning' || analysis.wellbeing.social === 'fair') {
+   } else if (wellbeing.social === 'concerning' || wellbeing.social === 'fair') {
      followUpFocus = "social_connection";
-   } else if (analysis.concerns.length > 0) {
+   } else if (concerns.length > 0) {
      followUpFocus = "expressed_concerns";
    } else {
      followUpFocus = "general_wellbeing";
@@ -785,10 +801,10 @@ User's name: ${userData?.name || "there"}
 Their initial response: "${initialResponse}"
 
 Analysis of their response:
-- Sentiment: ${analysis.sentiment}
-- Activities mentioned: ${analysis.activities.join(', ') || "None mentioned"}
-- Wellbeing: Physical (${analysis.wellbeing.physical}), Emotional (${analysis.wellbeing.emotional}), Social (${analysis.wellbeing.social})
-- Concerns: ${analysis.concerns.join(', ') || "None identified"}
+- Sentiment: ${sentiment}
+- Activities mentioned: ${activities.join(', ') || "None mentioned"}
+- Wellbeing: Physical (${wellbeing.physical}), Emotional (${wellbeing.emotional}), Social (${wellbeing.social})
+- Concerns: ${concerns.join(', ') || "None identified"}
 
 Focus area for follow-up: ${followUpFocus}
 
@@ -835,20 +851,30 @@ Examples of good follow-up questions:
 * @returns {Promise<string>} - Second follow-up question
 */
 async function generateSecondFollowUpQuestion(userId, analysis) {
- try {
-   const openaiClient = createOpenAIClient();
-   const userData = await UserModel.getUserDetails(userId);
-   
-   const prompt = `Generate a final, gentle follow-up question for an elderly person that helps complete our understanding of their wellbeing.
+  try {
+    const openaiClient = createOpenAIClient();
+    const userData = await UserModel.getUserDetails(userId);
+    
+    // Add defensive coding to ensure analysis and its properties exist
+    const safeAnalysis = analysis || {};
+    const wellbeing = safeAnalysis.wellbeing || {
+      physical: 'fair',
+      emotional: 'fair',
+      social: 'fair'
+    };
+    const concerns = safeAnalysis.concerns || [];
+    const sentiment = safeAnalysis.sentiment || 'neutral';
+    
+    const prompt = `Generate a final, gentle follow-up question for an elderly person that helps complete our understanding of their wellbeing.
 
 User's name: ${userData?.name || "there"}
 
 Current understanding of their wellbeing:
-- Sentiment: ${analysis.sentiment}
-- Physical wellbeing: ${analysis.wellbeing.physical}
-- Emotional wellbeing: ${analysis.wellbeing.emotional}
-- Social wellbeing: ${analysis.wellbeing.social}
-- Concerns identified: ${analysis.concerns.join(', ') || "None identified"}
+- Sentiment: ${sentiment}
+- Physical wellbeing: ${wellbeing.physical}
+- Emotional wellbeing: ${wellbeing.emotional}
+- Social wellbeing: ${wellbeing.social}
+- Concerns identified: ${concerns.join(', ') || "None identified"}
 
 Guidelines:
 1. Ask ONE specific question that helps complete your understanding of their current state
@@ -860,27 +886,27 @@ Guidelines:
 
 This should feel like the natural conclusion to a brief, caring check-in conversation.`;
 
-   const response = await openaiClient.chat.completions.create({
-     model: "gpt-3.5-turbo",
-     messages: [
-       {
-         role: "system",
-         content: "You are a compassionate companion for elderly individuals. Your follow-up questions are warm, specific, and show genuine interest in their wellbeing."
-       },
-       {
-         role: "user",
-         content: prompt
-       }
-     ],
-     temperature: 0.7,
-     max_tokens: 150
-   });
-   
-   return response.choices[0].message.content.trim();
- } catch (error) {
-   console.error(`❌ Error generating second follow-up question: ${error}`);
-   return "Is there anything specific that would help you feel better today? I'm here to listen. 💗";
- }
+    const response = await openaiClient.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [
+        {
+          role: "system",
+          content: "You are a compassionate companion for elderly individuals. Your follow-up questions are warm, specific, and show genuine interest in their wellbeing."
+        },
+        {
+          role: "user",
+          content: prompt
+        }
+      ],
+      temperature: 0.7,
+      max_tokens: 150
+    });
+    
+    return response.choices[0].message.content.trim();
+  } catch (error) {
+    console.error(`❌ Error generating second follow-up question: ${error}`);
+    return "Is there anything specific that would help you feel better today? I'm here to listen. 💗";
+  }
 }
 
 /**
@@ -893,6 +919,18 @@ async function analyzeConversation(conversationHistory, initialAnalysis) {
  try {
    const openaiClient = createOpenAIClient();
    
+   // Add defensive coding for the initialAnalysis object
+   const safeInitialAnalysis = initialAnalysis || {
+     sentiment: 'neutral',
+     activities: [],
+     wellbeing: {
+       physical: 'fair',
+       emotional: 'fair',
+       social: 'fair'
+     },
+     concerns: []
+   };
+   
    // Convert conversation history to a readable format
    const conversationText = conversationHistory.map(msg => 
      `${msg.role === 'user' ? 'Elderly person' : 'Assistant'}: ${msg.content}`
@@ -904,12 +942,12 @@ Conversation:
 ${conversationText}
 
 Initial analysis from first response:
-- Sentiment: ${initialAnalysis.sentiment}
-- Activities: ${initialAnalysis.activities.join(', ') || "None mentioned"}
-- Physical wellbeing: ${initialAnalysis.wellbeing.physical}
-- Emotional wellbeing: ${initialAnalysis.wellbeing.emotional}
-- Social wellbeing: ${initialAnalysis.wellbeing.social}
-- Initial concerns: ${initialAnalysis.concerns.join(', ') || "None identified"}
+- Sentiment: ${safeInitialAnalysis.sentiment}
+- Activities: ${(safeInitialAnalysis.activities || []).join(', ') || "None mentioned"}
+- Physical wellbeing: ${safeInitialAnalysis.wellbeing?.physical || 'fair'}
+- Emotional wellbeing: ${safeInitialAnalysis.wellbeing?.emotional || 'fair'}
+- Social wellbeing: ${safeInitialAnalysis.wellbeing?.social || 'fair'}
+- Initial concerns: ${(safeInitialAnalysis.concerns || []).join(', ') || "None identified"}
 
 Based on the FULL conversation, provide an updated analysis with:
 1. Overall sentiment (positive, neutral, negative)
@@ -938,12 +976,34 @@ Format the response as a JSON object with these fields.`;
    });
    
    // Parse the JSON response
-   return JSON.parse(aiResponse.choices[0].message.content);
+   const parsedResponse = JSON.parse(aiResponse.choices[0].message.content);
+   
+   // Ensure the response has the expected structure
+   return {
+     sentiment: parsedResponse.sentiment || 'neutral',
+     activities: parsedResponse.activities || [],
+     wellbeing: parsedResponse.wellbeing || {
+       physical: 'fair',
+       emotional: 'fair',
+       social: 'fair'
+     },
+     concerns: parsedResponse.concerns || [],
+     needsAssistance: parsedResponse.needsAssistance || false
+   };
  } catch (error) {
    console.error(`❌ Error analyzing conversation: ${error}`);
    
    // If analysis fails, use the initial analysis as fallback
-   return initialAnalysis;
+   return initialAnalysis || {
+     sentiment: 'neutral',
+     activities: [],
+     wellbeing: {
+       physical: 'fair',
+       emotional: 'fair',
+       social: 'fair'
+     },
+     concerns: []
+   };
  }
 }
 
@@ -956,6 +1016,18 @@ Format the response as a JSON object with these fields.`;
 */
 async function finalizeCheckIn(userId, session, analysis) {
  try {
+   // Add defensive coding for the analysis object
+   const safeAnalysis = analysis || {
+     sentiment: 'neutral',
+     activities: [],
+     wellbeing: {
+       physical: 'fair',
+       emotional: 'fair',
+       social: 'fair'
+     },
+     concerns: []
+   };
+   
    // Create the check-in data object with full conversation
    const checkInData = {
      checkInId: `${userId}_${Date.now()}`,
@@ -966,11 +1038,11 @@ async function finalizeCheckIn(userId, session, analysis) {
      response: session.conversationHistory.filter(msg => msg.role === 'user')[0].content,
      fullConversation: session.conversationHistory,
      conversationTurns: session.conversationHistory.filter(msg => msg.role === 'user').length,
-     sentiment: analysis.sentiment,
-     activities: analysis.activities,
-     wellbeing: analysis.wellbeing,
-     concerns: analysis.concerns,
-     needsAssistance: analysis.needsAssistance || false,
+     sentiment: safeAnalysis.sentiment,
+     activities: safeAnalysis.activities,
+     wellbeing: safeAnalysis.wellbeing,
+     concerns: safeAnalysis.concerns,
+     needsAssistance: safeAnalysis.needsAssistance || false,
      reportedTo: null,
      reported: false
    };
@@ -980,15 +1052,15 @@ async function finalizeCheckIn(userId, session, analysis) {
    console.log(`Saved check-in conversation from ${userId} with ${checkInData.conversationTurns} user turns`);
    
    // Generate a final response
-   const finalResponse = await generateFinalResponse(userId, analysis, session.conversationHistory);
+   const finalResponse = await generateFinalResponse(userId, safeAnalysis, session.conversationHistory);
    
    // Check if any urgent concerns were identified that need immediate attention
-   if (analysis.concerns && analysis.concerns.some(c => 
+   if (safeAnalysis.concerns && safeAnalysis.concerns.some(c => 
        c.toLowerCase().includes('emergency') || 
        c.toLowerCase().includes('severe') ||
        c.toLowerCase().includes('urgent'))) {
      // Here you could add code to send alerts to caregivers for urgent concerns
-     console.log(`⚠️ URGENT CONCERN DETECTED for ${userId}: ${analysis.concerns.join(', ')}`);
+     console.log(`⚠️ URGENT CONCERN DETECTED for ${userId}: ${safeAnalysis.concerns.join(', ')}`);
    }
    
    // Clear the active session
@@ -1024,20 +1096,34 @@ async function generateFinalResponse(userId, analysis, conversationHistory) {
    const openaiClient = createOpenAIClient();
    const userData = await UserModel.getUserDetails(userId);
    
+   // Add defensive coding for analysis and conversationHistory
+   const safeAnalysis = analysis || {
+     sentiment: 'neutral',
+     wellbeing: {
+       physical: 'fair',
+       emotional: 'fair',
+       social: 'fair'
+     },
+     concerns: []
+   };
+   
+   const safeConversationHistory = conversationHistory || [];
+   
    // Get the last user message for context
-   const lastUserMessage = conversationHistory.filter(msg => msg.role === 'user').pop().content;
+   const lastUserMessage = safeConversationHistory.filter(msg => msg.role === 'user').pop();
+   const lastMessageContent = lastUserMessage ? lastUserMessage.content : "No response";
    
    const prompt = `Generate a warm, supportive final message to conclude a check-in conversation with an elderly person.
 
 User's name: ${userData?.name || "Friend"}
-Their last message: "${lastUserMessage}"
+Their last message: "${lastMessageContent}"
 
 Analysis of the conversation:
-- Overall sentiment: ${analysis.sentiment}
-- Physical wellbeing: ${analysis.wellbeing.physical}
-- Emotional wellbeing: ${analysis.wellbeing.emotional}
-- Social wellbeing: ${analysis.wellbeing.social}
-- Concerns: ${analysis.concerns.join(', ') || "None identified"}
+- Overall sentiment: ${safeAnalysis.sentiment}
+- Physical wellbeing: ${safeAnalysis.wellbeing?.physical || 'fair'}
+- Emotional wellbeing: ${safeAnalysis.wellbeing?.emotional || 'fair'}
+- Social wellbeing: ${safeAnalysis.wellbeing?.social || 'fair'}
+- Concerns: ${(safeAnalysis.concerns || []).join(', ') || "None identified"}
 
 Guidelines:
 1. Be warm, empathetic, and supportive
@@ -1146,9 +1232,9 @@ async function getMedicationSummary(userPhone) {
       
       // Filter medications that are active today (startDate <= today <= endDate)
       const activeMedications = medications.filter(med => {
-        const startDate = new Date(med.startDate);
-        const endDate = new Date(med.endDate);
-        return startDate <= today && endDate >= today;
+        const startDate = med.startDate ? new Date(med.startDate) : null;
+        const endDate = med.endDate ? new Date(med.endDate) : null;
+        return (!startDate || startDate <= today) && (!endDate || endDate >= today);
       });
       
       if (activeMedications.length === 0) {
@@ -1175,7 +1261,7 @@ async function getMedicationSummary(userPhone) {
         // Construct the summary for this medication
         responseMessage += `💊 *${med.medicine}*:\n`;
         responseMessage += `   - Dosage: ${med.dosage || 'Not specified'}\n`;
-        responseMessage += `   - Reminder Time(s): ${Array.isArray(med.reminderTimes) ? med.reminderTimes.map(item => item.S || item).join(', ') : med.time}\n`;
+        responseMessage += `   - Reminder Time(s): ${Array.isArray(med.reminderTimes) ? med.reminderTimes.join(', ') : med.time}\n`;
         responseMessage += `   - Frequency: ${med.frequency || 'Not specified'}\n`;
         responseMessage += `   - Duration: ${med.duration ? med.duration + ' days' : 'Ongoing'}\n`;
         responseMessage += `   - Start Date: ${med.startDate ? formatDate(med.startDate) : 'N/A'}\n`;
@@ -1194,6 +1280,78 @@ async function getMedicationSummary(userPhone) {
   }
 
 
+/**
+ * Get an active check-in session for a user
+ * @param {string} userId - User's phone number
+ * @returns {Object|null} - Active check-in session or null if none
+ */
+function getActiveCheckInSession(userId) {
+  const standardizedUserId = standardizePhoneNumber(userId);
+  return activeCheckInSessions[standardizedUserId] || null;
+}
+
+/**
+* Clear an active check-in session for a user
+* @param {string} userId - User's phone number
+* @returns {boolean} - Success status
+*/
+function clearActiveCheckInSession(userId) {
+  const standardizedUserId = standardizePhoneNumber(userId);
+  
+  if (activeCheckInSessions[standardizedUserId]) {
+      console.log(`🧹 Clearing active check-in session for ${standardizedUserId}`);
+      delete activeCheckInSessions[standardizedUserId];
+      return true;
+  }
+  
+  return false;
+}
+
+/**
+* Handle potential conversation conflicts between check-ins and reminders
+* @param {string} userId - User's phone number
+* @param {Object} reminderData - Medication reminder data
+* @returns {boolean} - Whether the check-in should be paused
+*/
+function handleCheckInReminderConflict(userId, reminderData) {
+  const standardizedUserId = standardizePhoneNumber(userId);
+  const activeCheckIn = activeCheckInSessions[standardizedUserId];
+  
+  if (!activeCheckIn) return false;
+  
+  // Store the reminder details in the check-in session
+  activeCheckIn.pendingReminder = reminderData;
+  activeCheckIn.pendingReminderTime = new Date().toISOString();
+  
+  console.log(`📝 Marked check-in session with pending reminder for ${standardizedUserId}`);
+  return true;
+}
+
+/**
+* Resume a check-in after a medication reminder
+* @param {string} userId - User's phone number
+* @returns {Promise<boolean>} - Success status
+*/
+async function resumeCheckInAfterReminder(userId) {
+  const standardizedUserId = standardizePhoneNumber(userId);
+  const activeCheckIn = activeCheckInSessions[standardizedUserId];
+  
+  if (!activeCheckIn || !activeCheckIn.pendingReminder) return false;
+  
+  // Clear the pending reminder flag
+  delete activeCheckIn.pendingReminder;
+  delete activeCheckIn.pendingReminderTime;
+  
+  // Send a message to resume the check-in
+  await sendWhatsAppMessage(userId, 
+      "Now, let's continue our conversation from earlier. " +
+      `You were responding to: "${activeCheckIn.lastQuestion || 'my last question'}"`
+  );
+  
+  console.log(`🔄 Resumed check-in session for ${standardizedUserId} after medication reminder`);
+  return true;
+} 
+
 // Export the functions
 module.exports = {
  initializeCheckInScheduler,
@@ -1201,5 +1359,10 @@ module.exports = {
  scheduleDailyReports,
  generateDailyReport,
  sendDailyReports,
- getMedicationSummary
+ getMedicationSummary,
+ getActiveCheckInSession,
+ clearActiveCheckInSession,
+ handleCheckInReminderConflict,
+ resumeCheckInAfterReminder,
+ executeImmediateCheckIn
 };

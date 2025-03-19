@@ -1,3 +1,5 @@
+
+
 // routes/webhookRoutes.js - Route handlers for webhook endpoints
 const express = require('express');
 const router = express.Router();
@@ -8,9 +10,11 @@ const medicationService = require('../services/medicationService');
 const proxyService = require('../services/proxyService');
 const aiResponseService = require('../services/aiResponseService');
 const medicationInfoService = require('../services/medicationInfoService');
-const { ReminderModel, SymptomModel } = require('../models/dbModels');
+const { ReminderModel, SymptomModel, DB_TABLES } = require('../models/dbModels');
 const sessionStore = require('../models/sessionStore');
 const checkInService = require('../services/checkInService');
+const conversationUtils = require('../utils/conversationUtils');
+const { dynamoDB } = require('../config/config');
 
 // Import handlers
 const accountHandler = require('../handlers/accountHandler');
@@ -30,43 +34,343 @@ router.post('/', async (req, res) => {
         const profileName = req.body.ProfileName || "User";
 
         console.log(`📩 Incoming message from ${from}: ${incomingMsg}`);
-
-        // Get the current session state early
         const standardizedFrom = standardizePhoneNumber(from);
-        let userSession = sessionStore.getUserSession(from);
-        
-        // If session not found with original format, try standardized format
-        if (!userSession) {
-            userSession = sessionStore.getUserSession(standardizedFrom);
-            console.log(`Looking for session with standardized phone: ${standardizedFrom}`);
-        }
-        
-        const medicationSession = sessionStore.getMedicationSession(from);
-        
-        // Log the current session state for debugging
-        console.log(`Current user session: ${userSession ? JSON.stringify(userSession) : 'None'}`);
-        console.log(`Current medication session: ${medicationSession ? JSON.stringify(medicationSession) : 'None'}`);
 
         //======================================================================
-        // PART 0: HANDLE MEDICATION REMINDERS FIRST (HIGHEST PRIORITY)
+        // PART 0: HANDLE ONGOING DISAMBIGUATION FIRST
         //======================================================================
-
-        // Handle "Yes/No" medication responses (regardless of user session)
-        if (incomingMsgLower === "yes" || incomingMsgLower === "no") {
-            console.log(`Checking for medication reminders for: ${standardizedFrom}`);
-            const thirtyMinutesAgo = new Date(new Date().getTime() - 30 * 60 * 1000);
-            console.log(`Looking for reminders since: ${thirtyMinutesAgo.toISOString()}`);
+        
+        // Get the current session state
+        let userSession = sessionStore.getUserSession(from) || sessionStore.getUserSession(standardizedFrom);
+        
+        // Handle ongoing disambiguation session first
+        if (userSession && userSession.type === 'disambiguation') {
+            console.log(`Processing disambiguation response: stage=${userSession.stage}, response=${incomingMsg}`);
             
-            // Get the latest reminder from database to see if this is a medication response
+            // Handle specific disambiguation for medication vs check-in
+            if (userSession.stage === 'reminder_vs_checkin') {
+                if (incomingMsg === "1") {
+                    // User is responding to medication reminder
+                    console.log(`User clarified they are responding to medication reminder`);
+                    
+                    // Restore the original response and clear the disambiguation
+                    const originalResponse = userSession.originalResponse;
+                    const reminderData = userSession.reminderData;
+                    
+                    // Clear the disambiguation session
+                    sessionStore.deleteUserSession(from);
+                    sessionStore.deleteUserSession(standardizedFrom);
+                    
+                    // Clear any check-in session to avoid future conflicts
+                    checkInService.clearActiveCheckInSession(standardizedFrom);
+                    
+                    // Process as medication response
+                    try {
+                        req.body.Body = originalResponse; // Replace with original response
+                        
+                        if (originalResponse.toLowerCase() === "yes" || originalResponse.toLowerCase() === "taken") {
+                            return await medicationHandler.handleMedicationTaken(req, res);
+                        } else {
+                            return await medicationHandler.handleMedicationMissed(req, res);
+                        }
+                    } catch (error) {
+                        console.error(`❌ Error handling medication response after disambiguation: ${error}`);
+                        await sendWhatsAppMessage(from, "Sorry, there was an error processing your medication response. Please try again later.");
+                        return res.status(200).send("Error handling medication response after disambiguation");
+                    }
+                } else if (incomingMsg === "2") {
+                    // User is responding to check-in
+                    console.log(`User clarified they are responding to check-in`);
+                    
+                    // Restore the original response
+                    const originalResponse = userSession.originalResponse;
+                    const checkInData = userSession.checkInData;
+                    const reminderData = userSession.reminderData;
+                    
+                    // Clear the disambiguation session
+                    sessionStore.deleteUserSession(from);
+                    sessionStore.deleteUserSession(standardizedFrom);
+                    
+                    // Mark the reminder as skipped due to conflict
+                    if (reminderData && reminderData.reminderId) {
+                        await ReminderModel.markReminderSkipped(reminderData.reminderId, "User chose to respond to check-in instead");
+                    }
+                    
+                    // Process the check-in response
+                    const checkInResult = await checkInService.processCheckInResponse(standardizedFrom, originalResponse);
+                    
+                    if (checkInResult && checkInResult.success) {
+                        await sendWhatsAppMessage(from, checkInResult.followUp);
+                        
+                        if (checkInResult.conversationComplete) {
+                            // Remind about the skipped medication after check-in completes
+                            setTimeout(async () => {
+                                if (reminderData && reminderData.medicine) {
+                                    await sendWhatsAppMessage(from, 
+                                        `Don't forget to take your ${reminderData.medicine}! Please respond with "Yes" when you've taken it or "No" if you need a reminder later.`
+                                    );
+                                }
+                                
+                                // Show main menu afterward
+                                setTimeout(async () => {
+                                    await menuHandler.sendMainMenu(from);
+                                }, 3000);
+                            }, 2000);
+                        }
+                        
+                        return res.status(200).send("Check-in response processed after disambiguation");
+                    } else {
+                        // If check-in processing failed, show the main menu
+                        setTimeout(async () => {
+                            await menuHandler.sendMainMenu(from);
+                        }, 2000);
+                        
+                        return res.status(200).send("Failed to process check-in after disambiguation");
+                    }
+                } else {
+                    // Invalid choice
+                    await sendWhatsAppMessage(from, 
+                        `Please reply with either 1 for medication reminder or 2 for check-in conversation.`
+                    );
+                    return res.status(200).send("Invalid disambiguation choice");
+                }
+            }
+            // Handle general disambiguation using the conversation utilities
+            else if (userSession.stage === 'general') {
+                try {
+                    // Get the selected conversation option
+                    const optionIndex = parseInt(incomingMsg) - 1;
+                    
+                    if (isNaN(optionIndex) || optionIndex < 0 || optionIndex >= userSession.options.length) {
+                        // Invalid option selected
+                        await sendWhatsAppMessage(from, `Please select a valid option between 1 and ${userSession.options.length}.`);
+                        return res.status(200).send("Invalid disambiguation option");
+                    }
+                    
+                    const selectedOption = userSession.options[optionIndex];
+                    const originalResponse = userSession.originalResponse;
+                    
+                    console.log(`User selected conversation: ${selectedOption.type} (${selectedOption.description})`);
+                    
+                    // Clear the disambiguation session
+                    sessionStore.deleteUserSession(from);
+                    sessionStore.deleteUserSession(standardizedFrom);
+                    
+                    // Process based on the selected conversation type
+                    if (selectedOption.type === 'medication_reminder') {
+                        // Restore medication reminder flow
+                        req.body.Body = originalResponse;
+                        
+                        if (originalResponse.toLowerCase() === "yes" || originalResponse.toLowerCase() === "taken") {
+                            return await medicationHandler.handleMedicationTaken(req, res);
+                        } else {
+                            return await medicationHandler.handleMedicationMissed(req, res);
+                        }
+                    }
+                    else if (selectedOption.type === 'check_in_response') {
+                        // Process as check-in response
+                        const checkInResult = await checkInService.processCheckInResponse(standardizedFrom, originalResponse);
+                        
+                        if (checkInResult && checkInResult.success) {
+                            await sendWhatsAppMessage(from, checkInResult.followUp);
+                            
+                            if (checkInResult.conversationComplete) {
+                                setTimeout(async () => {
+                                    await menuHandler.sendMainMenu(from);
+                                }, 2000);
+                            }
+                            
+                            return res.status(200).send("Check-in response processed after disambiguation");
+                        }
+                    }
+                    else if (selectedOption.type === 'symptom_assessment') {
+                        // Restore symptom assessment flow
+                        req.body.Body = originalResponse;
+                        return await symptomHandler.continueSymptomAssessment(req, res);
+                    }
+                    else if (selectedOption.type === 'menu_navigation') {
+                        // Restore menu navigation
+                        req.body.Body = originalResponse;
+                        if (selectedOption.data.stage === 'main_menu') {
+                            return await menuHandler.handleMainMenuSelection(req, res);
+                        } else {
+                            return await menuHandler.handleMedicationMenuSelection(req, res);
+                        }
+                    }
+                    else if (selectedOption.type === 'medication_management') {
+                        // Restore medication management flow based on stage
+                        req.body.Body = originalResponse;
+                        
+                        // Determine which medication handler to use based on the stage
+                        const stage = selectedOption.data.stage;
+                        
+                        if (stage === 1 || stage === 2 || stage.toString().startsWith('add_')) {
+                            return await medicationHandler.continueAddMedication(req, res);
+                        }
+                        else if (stage.toString().startsWith('update_')) {
+                            return await medicationHandler.continueMedicationUpdate(req, res);
+                        }
+                        else if (stage.toString().startsWith('delete_')) {
+                            return await medicationHandler.continueMedicationDeletion(req, res);
+                        }
+                    }
+                    
+                    // If we get here, we couldn't specifically handle the selected option
+                    await sendWhatsAppMessage(from, "I'm not sure how to process your response. Let's start fresh.");
+                    await menuHandler.sendMainMenu(from);
+                    return res.status(200).send("Disambiguation fallback");
+                    
+                } catch (error) {
+                    console.error(`❌ Error handling general disambiguation: ${error}`);
+                    
+                    // Clear session and go to main menu as fallback
+                    sessionStore.deleteUserSession(from);
+                    sessionStore.deleteUserSession(standardizedFrom);
+                    
+                    await sendWhatsAppMessage(from, "I'm sorry, I had trouble understanding your response. Let's start over.");
+                    await menuHandler.sendMainMenu(from);
+                    return res.status(200).send("Disambiguation error fallback");
+                }
+            }
+        }
+
+        //======================================================================
+        // PART 1: DETECT & HANDLE CONVERSATION CONFLICTS
+        //======================================================================
+        
+        // Get active check-in session for conflict detection
+        const activeCheckIn = checkInService.getActiveCheckInSession(standardizedFrom);
+        
+        // Use conversationUtils to detect potential conflicts
+        const conflictInfo = await conversationUtils.detectConversationConflicts(
+            standardizedFrom,
+            sessionStore,
+            { [standardizedFrom]: activeCheckIn },  // Map active check-in sessions
+            ReminderModel.getLatestReminder
+        );
+        
+        // If we have multiple active conversations, manage the potential conflict
+        if (conflictInfo.hasConflict) {
+            console.log(`⚠️ Detected conversation conflict: ${conflictInfo.activeConversations.length} active conversations`);
+            conflictInfo.activeConversations.forEach((conv, index) => {
+                console.log(`  ${index + 1}. ${conv.type}: ${conv.description}`);
+            });
+            
+            // Check if the current message helps disambiguate the intent
+            const disambiguationResult = conversationUtils.handleDisambiguation(
+                incomingMsg, 
+                conflictInfo
+            );
+            
+            // If we can automatically determine which conversation without asking, proceed
+            if (!disambiguationResult.needsDisambiguation) {
+                console.log(`🔄 Proceeding with conversation: ${disambiguationResult.targetConversation.type}`);
+                
+                // Nothing to do here - we'll continue with normal processing
+                // The priority system ensures medication reminders are checked first
+            } 
+            // Otherwise, ask the user to disambiguate their intent
+            else {
+                console.log(`❓ Asking user to disambiguate their intent (type: ${disambiguationResult.conflictType})`);
+                
+                // Generate appropriate disambiguation message
+                const message = conversationUtils.generateDisambiguationMessage(
+                    disambiguationResult
+                );
+                
+                // Save the disambiguation state in the session
+                sessionStore.setUserSession(from, {
+                    type: 'disambiguation',
+                    stage: 'general',
+                    options: disambiguationResult.options,
+                    originalResponse: incomingMsg,
+                    timestamp: Date.now()
+                });
+                
+                // Also save with standardized phone if different
+                if (standardizedFrom !== from) {
+                    sessionStore.setUserSession(standardizedFrom, {
+                        type: 'disambiguation',
+                        stage: 'general',
+                        options: disambiguationResult.options,
+                        originalResponse: incomingMsg,
+                        timestamp: Date.now()
+                    });
+                }
+                
+                // Send disambiguation message
+                await sendWhatsAppMessage(from, message);
+                return res.status(200).send("Asked for disambiguation between multiple conversations");
+            }
+        }
+
+        //======================================================================
+        // PART 2: HANDLE MEDICATION REMINDERS WITH IMPROVED DETECTION
+        //======================================================================
+
+        // More robust check for medication responses
+        if (incomingMsgLower === "yes" || incomingMsgLower === "no" || 
+            incomingMsgLower === "taken" || incomingMsgLower === "missed") {
+            
+            console.log(`Checking medication reminders for: ${standardizedFrom}`);
+            // Extend window to 60 minutes to be more lenient with reminder responses
+            const sixtyMinutesAgo = new Date(new Date().getTime() - 60 * 60 * 1000);
+            console.log(`Looking for reminders since: ${sixtyMinutesAgo.toISOString()}`);
+            
+            // Get the latest reminder from database
             const latestReminder = await ReminderModel.getLatestReminder(standardizedFrom);
             console.log(`Latest reminder check result:`, latestReminder);
             
-            // If there's a recent unresponded reminder, treat this as a medication response
+            // If there's a recent unresponded reminder
             if (latestReminder && !latestReminder.responded) {
                 console.log(`Found active reminder for ${standardizedFrom}, treating "${incomingMsg}" as medication response`);
                 
+                // If there's also an active check-in, we already handled the conflict detection above
+                // with conversationUtils, but we keep this check as a backup
+                if (activeCheckIn && activeCheckIn.conversationState !== 'completed' && 
+                    !conflictInfo.hasConflict) { // Only if not already handled by conflict detection
+                        
+                    console.log(`❗ Found both active reminder AND active check-in - disambiguation needed`);
+                    
+                    // Set up a disambiguation session
+                    sessionStore.setUserSession(from, {
+                        type: 'disambiguation',
+                        stage: 'reminder_vs_checkin',
+                        reminderData: latestReminder,
+                        checkInData: activeCheckIn,
+                        originalResponse: incomingMsg,
+                        timestamp: Date.now()
+                    });
+                    
+                    // Also with standardized phone if different
+                    if (standardizedFrom !== from) {
+                        sessionStore.setUserSession(standardizedFrom, {
+                            type: 'disambiguation',
+                            stage: 'reminder_vs_checkin',
+                            reminderData: latestReminder,
+                            checkInData: activeCheckIn,
+                            originalResponse: incomingMsg,
+                            timestamp: Date.now()
+                        });
+                    }
+                    
+                    await sendWhatsAppMessage(from, 
+                        `I noticed you have both a medication reminder and an active check-in conversation. Which one are you responding to?\n\n` +
+                        `1️⃣ Medication reminder (${latestReminder.medicine})\n` +
+                        `2️⃣ Check-in conversation\n\n` +
+                        `Please reply with 1 or 2.`
+                    );
+                    
+                    return res.status(200).send("Asked for disambiguation between reminder and check-in");
+                }
+                
+                // No conflict, proceed with medication response
                 try {
-                    if (incomingMsgLower === "yes") {
+                    // Clear any potentially conflicting sessions
+                    sessionStore.deleteUserSession(from);
+                    sessionStore.deleteUserSession(standardizedFrom);
+                    
+                    if (incomingMsgLower === "yes" || incomingMsgLower === "taken") {
                         return await medicationHandler.handleMedicationTaken(req, res);
                     } else {
                         return await medicationHandler.handleMedicationMissed(req, res);
@@ -77,15 +381,23 @@ router.post('/', async (req, res) => {
                     return res.status(200).send("Error handling medication response");
                 }
             }
-            console.log(`No active reminder found for ${standardizedFrom}, treating "${incomingMsg}" as regular message`);
+            console.log(`No active medication reminder found for ${standardizedFrom}, continuing with regular processing`);
         }
 
+        // Refresh user session after potential changes
+        userSession = sessionStore.getUserSession(from) || sessionStore.getUserSession(standardizedFrom);
+        const medicationSession = sessionStore.getMedicationSession(from) || sessionStore.getMedicationSession(standardizedFrom);
+        
+        // Log the current session state for debugging
+        console.log(`Current user session: ${userSession ? JSON.stringify(userSession) : 'None'}`);
+        console.log(`Current medication session: ${medicationSession ? JSON.stringify(medicationSession) : 'None'}`);
+
         //======================================================================
-        // PART 1: HANDLE ACTIVE SESSIONS AND ONGOING CONVERSATIONS
+        // PART 3: HANDLE ACTIVE SESSIONS AND ONGOING CONVERSATIONS
         //======================================================================
         
         // Continue account creation flow if in progress
-        if (sessionStore.getAccountCreationSession(from)) {
+        if (sessionStore.getAccountCreationSession(from) || sessionStore.getAccountCreationSession(standardizedFrom)) {
             return await accountHandler.continueAccountCreation(req, res);
         }
 
@@ -136,7 +448,7 @@ router.post('/', async (req, res) => {
         }
 
         //======================================================================
-        // PART 2: HANDLE CHECK-IN RESPONSES
+        // PART 4: HANDLE CHECK-IN RESPONSES
         //======================================================================
         
         // Check if this might be a response to a check-in
@@ -171,7 +483,7 @@ router.post('/', async (req, res) => {
         }
 
         //======================================================================
-        // PART 3: HANDLE SYMPTOM FOLLOW-UPS FOR DIRECT NUMERIC RESPONSES
+        // PART 5: HANDLE SYMPTOM FOLLOW-UPS FOR DIRECT NUMERIC RESPONSES
         //======================================================================
 
         // Handle numeric symptom follow-up responses (1, 2, 3, 4) ONLY if not in an active session
@@ -229,7 +541,7 @@ router.post('/', async (req, res) => {
         }
 
         //======================================================================
-        // PART 4: HANDLE ACCOUNT MANAGEMENT
+        // PART 6: HANDLE ACCOUNT MANAGEMENT
         //======================================================================
 
         // Check if user exists
@@ -250,7 +562,7 @@ router.post('/', async (req, res) => {
         }
 
         //======================================================================
-        // PART 5: HANDLE EXPLICIT COMMANDS AND NAVIGATIONAL INPUTS
+        // PART 7: HANDLE EXPLICIT COMMANDS AND NAVIGATIONAL INPUTS
         //======================================================================
 
         // Handle proxy commands (child managing parent's account)
@@ -272,7 +584,7 @@ router.post('/', async (req, res) => {
         }
         
         //======================================================================
-        // PART 6: HANDLE FEATURE-SPECIFIC COMMANDS
+        // PART 8: HANDLE FEATURE-SPECIFIC COMMANDS
         //======================================================================
         
         // Symptom assessment commands
@@ -359,7 +671,7 @@ router.post('/', async (req, res) => {
         }
         
         //======================================================================
-        // PART 7: HANDLE GENERIC QUERIES WITH AI
+        // PART 9: HANDLE GENERIC QUERIES WITH AI
         //======================================================================
 
         // AI Response for any other query - this also handles casual conversation for check-ins
@@ -398,7 +710,7 @@ async function handleProxyCommand(req, res, proxyCommand) {
     
     await sendWhatsAppMessage(from, result.message);
     
-    // If needed, notify the parent
+// If needed, notify the parent
     if (result.success && result.notifyParent) {
         await proxyService.notifyParentOfProxyAction(
             parentPhone,
@@ -409,6 +721,36 @@ async function handleProxyCommand(req, res, proxyCommand) {
     }
     
     return res.status(200).send("Proxy command processed");
+}
+
+/**
+ * Check if there's a recent medication reminder
+ * @param {string} userPhone - User's phone number
+ * @returns {Promise<Object|null>} - Reminder data or null if none
+ */
+async function isRecentMedicationReminderSent(userPhone) {
+    try {
+        const thirtyMinutesAgo = new Date(new Date().getTime() - 30 * 60 * 1000);
+        
+        const params = {
+            TableName: DB_TABLES.REMINDERS_TABLE,
+            IndexName: "UserPhoneIndex",
+            KeyConditionExpression: "userPhone = :phone",
+            FilterExpression: "createdAt > :time",
+            ExpressionAttributeValues: { 
+                ":phone": userPhone,
+                ":time": thirtyMinutesAgo.toISOString()
+            },
+            ScanIndexForward: false, // Get most recent first
+            Limit: 1
+        };
+        
+        const result = await dynamoDB.query(params).promise();
+        return (result.Items && result.Items.length > 0) ? result.Items[0] : null;
+    } catch (error) {
+        console.error(`❌ Error checking recent medication reminders: ${error}`);
+        return null;
+    }
 }
 
 module.exports = router;

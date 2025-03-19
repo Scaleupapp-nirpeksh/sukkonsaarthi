@@ -32,7 +32,7 @@ followUpService.startFollowUpScheduler();
 checkInService.initializeCheckInScheduler();
 checkInService.scheduleDailyReports();
 
-//checkInService.sendDailyReports();
+checkInService.sendDailyReports();
 
 // Graceful shutdown
 process.on('SIGINT', () => {
@@ -46,3 +46,4 @@ process.on('SIGINT', () => {
 app.listen(port, () => {
     console.log(`🚀 Sukoon Saarthi backend running on http://localhost:${port}`);
 });
+	

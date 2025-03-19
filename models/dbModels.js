@@ -613,6 +613,110 @@ updateReminder: async (reminderId, updateData) => {
             console.error(`❌ Error getting latest reminder: ${error}`);
             return null;
         }
+    },
+
+/**
+     * Get the latest reminder for a user with improved time window and status tracking
+     * @param {string} userPhone - User's phone number
+     * @returns {Promise<Object|null>} - Latest reminder or null if none
+     */
+    getLatestReminder: async (userPhone) => {
+        try {
+            const standardizedPhone = userPhone.replace('whatsapp:', '');
+            const now = new Date();
+            // Extend time window to 60 minutes to be more lenient with response timing
+            const sixtyMinutesAgo = new Date(now.getTime() - 60 * 60 * 1000);
+            
+            console.log(`Looking for latest reminder for ${standardizedPhone} since ${sixtyMinutesAgo.toISOString()}`);
+            
+            const params = {
+                TableName: DB_TABLES.REMINDERS_TABLE,
+                IndexName: "UserPhoneIndex",
+                KeyConditionExpression: "userPhone = :phone",
+                FilterExpression: "createdAt > :time AND (responded = :r OR attribute_not_exists(responded))",
+                ExpressionAttributeValues: { 
+                    ":phone": standardizedPhone,
+                    ":time": sixtyMinutesAgo.toISOString(),
+                    ":r": false
+                },
+                ScanIndexForward: false, // Get most recent first
+                Limit: 1
+            };
+            
+            const result = await dynamoDB.query(params).promise();
+            console.log(`Found ${result.Items ? result.Items.length : 0} recent reminders for ${userPhone}`);
+            
+            if (result.Items && result.Items.length > 0) {
+                console.log(`Latest reminder details: ${JSON.stringify(result.Items[0])}`);
+            }
+            
+            return (result.Items && result.Items.length > 0) ? result.Items[0] : null;
+        } catch (error) {
+            console.error(`❌ Error getting latest reminder: ${error}`);
+            return null;
+        }
+    },
+
+    /**
+     * Get ALL recent reminders for a user (both responded and unresponded)
+     * @param {string} userPhone - User's phone number 
+     * @param {number} minutesWindow - How many minutes back to look
+     * @returns {Promise<Array>} - Array of recent reminders
+     */
+    getRecentReminders: async (userPhone, minutesWindow = 60) => {
+        try {
+            const standardizedPhone = userPhone.replace('whatsapp:', '');
+            const now = new Date();
+            const timeWindow = new Date(now.getTime() - minutesWindow * 60 * 1000);
+            
+            const params = {
+                TableName: DB_TABLES.REMINDERS_TABLE,
+                IndexName: "UserPhoneIndex",
+                KeyConditionExpression: "userPhone = :phone",
+                FilterExpression: "createdAt > :time",
+                ExpressionAttributeValues: { 
+                    ":phone": standardizedPhone,
+                    ":time": timeWindow.toISOString()
+                },
+                ScanIndexForward: false // Get most recent first
+            };
+            
+            const result = await dynamoDB.query(params).promise();
+            return result.Items || [];
+        } catch (error) {
+            console.error(`❌ Error getting recent reminders: ${error}`);
+            return [];
+        }
+    },
+
+    /**
+     * Mark a specific medication reminder as skipped due to conflict
+     * @param {string} reminderId - Reminder ID
+     * @param {string} conflictReason - Reason for skipping (e.g., "check-in conflict")
+     * @returns {Promise<boolean>} - Success status
+     */
+    markReminderSkipped: async (reminderId, conflictReason) => {
+        try {
+            const params = {
+                TableName: DB_TABLES.REMINDERS_TABLE,
+                Key: { reminderId },
+                UpdateExpression: "set responded = :r, #s = :s, conflictReason = :cr",
+                ExpressionAttributeValues: { 
+                    ":r": true,
+                    ":s": "skipped",
+                    ":cr": conflictReason
+                },
+                ExpressionAttributeNames: {
+                    "#s": "status"
+                }
+            };
+
+            await dynamoDB.update(params).promise();
+            return true;
+        } catch (error) {
+            console.error(`❌ Error marking reminder as skipped: ${error}`);
+            return false;
+        }
     }
 };
 
